@@ -1,0 +1,731 @@
+---
+title: "A Tutorial on Measurement Invariance Testing for Ordered-Categorical Items"
+bibliography: [../bib/micat.bib]
+output:
+  pdf_document: 
+    toc: TRUE
+    toc_depth: 3
+---
+
+```{r setup, include = FALSE}
+library(papaja)
+library(tidyverse)
+library(lavaan)
+library(gtools)
+library(knitr)
+library(kableExtra)
+```
+
+\newpage
+
+```{r include=FALSE}
+# Helper functions for reporting
+
+# Helper function for showing fit indices
+get_fit <- function(object) {
+  fm <- lavaan::fitmeasures(object)
+  chisq <- fm["chisq.scaled"]
+  df <- fm["df.scaled"]
+  pval <- fm["pvalue.scaled"]
+  cfi <- fm["cfi.scaled"]
+  rmsea <- fm["rmsea.scaled"]
+  rmsea_l <- fm["rmsea.ci.lower.scaled"]
+  rmsea_u <- fm["rmsea.ci.upper.scaled"]
+  srmr <- fm["srmr"]
+  paste0("$\\chi^2(", df, ") = ", 
+         papaja::printnum(chisq), 
+         "$, $p ", papaja::printp(pval, add_equals = TRUE), 
+         "$,", " RMSEA = ", papaja::printnum(rmsea), 
+         ", ","95%CI [",papaja::printnum(rmsea_l),
+         ", " ,papaja::printnum(rmsea_u), "], ",
+         "CFI = ", papaja::printnum(cfi), ", SRMR = ",
+         papaja::printnum(srmr))
+}
+
+# Helper function for obtaining LRT
+get_lrt <- function(object1, object2){
+  lrt <- lavaan::lavTestLRT(object1, object2, 
+                            method = "satorra.bentler.2010")
+  chisq <- lrt["Chisq diff"][2,1]
+  df <- lrt["Df diff"][2,1]
+  pval <- lrt["Pr(>Chisq)"][2,1]
+  paste0("scaled $\\Delta \\chi^2(", df, ") = ", 
+          papaja::printnum(chisq), 
+         "$, $p ", papaja::printp(pval, add_equals = TRUE), 
+         "$")
+}
+# Helper function for reporting factor mean difference
+get_mdiff <- function(model, scalar_fit, strict_fit){
+  if (model == "scalar"){
+    par <- parameterestimates(scalar_fit)
+    mdiff <- subset(par, group == 2 & lhs == "f" & op == "~1")
+  }else if(model == "strict"){
+    par <- parameterestimates(strict_fit)
+    mdiff <- subset(par, group == 2 & lhs == "f" & op == "~1")
+  }
+  paste0("$", papaja::printnum(mdiff$est), ", 95\\% \\text{ CI }[",
+         papaja::printnum(mdiff$ci.lower), papaja::printnum(mdiff$ci.upper),"]$")
+}
+```
+
+# Helper Function: `search_ninv()`
+
+```{r}
+# Helper function for the search of noninvariant items using 
+# the chi-square difference test
+search_ninv <- function(data, model, fit, group, 
+                        par = c("loadings", "thresholds", "unique.var")) {
+  chi_diff <- rep(NA)
+  # number of groups
+  n_groups <- nrow(unique(subset(parameterestimates(fit), select = group)))
+  # extract parameter labels in the syntax
+  if (par == "loadings") {
+    labels <- (subset(parameterestimates(fit), op == "=~" & group == 1))$label
+  } else if (par == "thresholds") {
+    labels <- (subset(parameterestimates(fit), op == "|" & group == 1))$label
+  } else if (par == "unique.var") {
+    labels <- (subset(parameterestimates(fit),op == "~~" & group == 1))$label[-1]
+  }
+  # iteratively free a parameter and compare with the original model fit
+  for (i in seq_len(length(labels))) {
+    partial_mod <- gsub(
+      paste0("c\\(", 
+             paste0(rep(labels[i], n_groups), collapse = ", "), 
+             "\\)"), 
+      "c(NA, NA)", model
+    )
+    partial_fit <- cfa(model = partial_mod, 
+                     data = data, 
+                     estimator = "WLSMV", 
+                     ordered = TRUE, 
+                     group = group, 
+                     parameterization = "theta")
+    chi_diff[i] <- lavTestLRT(partial_fit, fit, 
+                              method = "satorra.2000")["Chisq diff"][[1]][2]
+  }
+  return(list(chi_diff = chi_diff, 
+              max_chi_diff = max(chi_diff), 
+              label = labels[which.max(chi_diff)]))
+}
+```
+
+
+\newpage
+
+In this tutorial, we illustrate the measurement invariance (MI) testing procedure for ordered-polytomous and dichotomous items using *lavaan*. We follow the identification conditions described in @millsap2004 and note that there are alternative identification conditions and test procedures [e.g., @wu2016]. 
+
+For replicability, we use the following syntax to import the data provided by Sharman et al. (2019) and select the variables of gender and the seven items in the Helpful subscale.
+
+```{r}
+dat <- read.csv("https://osf.io/6gsy8/download")
+dat_sub <- subset(dat, select = c(Gender, BACS_38, BACS_31, 
+                                  BACS_29, BACS_30, BACS_1, 
+                                  BACS_26, BACS_4))
+```
+
+
+## MI Testing With Ordered-Polytomous Items
+
+Here we provide the complete R codes for the test procedures described in the main text of the paper. For more details, please refer to the main text.
+
+
+
+### Test of Configural Invariance
+
+We start with a configural model, which assesses the equality of the number and pattern of parameters between groups. 
+
+```{r}
+configural_mod <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(NA, NA) * BACS_31 + 
+     c(NA, NA) * BACS_29 + c(NA, NA) * BACS_30 + c(NA, NA) * BACS_1 + 
+     c(NA, NA) * BACS_26 + c(NA, NA) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_38 | c(t2, t2) * t2
+BACS_38 | c(t3, t3a) * t3
+BACS_38 | c(t4, t4a) * t4
+BACS_31 | c(t5, t5a) * t1
+BACS_31 | c(t6, t6) * t2
+BACS_31 | c(t7, t7a) * t3
+BACS_31 | c(t8, t8a) * t4
+BACS_29 | c(t9, t9a) * t1
+BACS_29 | c(t10, t10) * t2
+BACS_29 | c(t11, t11a) * t3
+BACS_29 | c(t12, t12a) * t4
+BACS_30 | c(t13, t13a) * t1
+BACS_30 | c(t14, t14) * t2
+BACS_30 | c(t15, t15a) * t3
+BACS_30 | c(t16, t16a) * t4
+BACS_1 | c(t17, t17a) * t1
+BACS_1 | c(t18, t18) * t2
+BACS_1 | c(t19, t19a) * t3
+BACS_1 | c(t20, t20a) * t4
+BACS_26 | c(t21, t21a) * t1
+BACS_26 | c(t22, t22) * t2
+BACS_26 | c(t23, t23a) * t3
+BACS_26 | c(t24, t24a) * t4
+BACS_4 | c(t25, t25a) * t1
+BACS_4 | c(t26, t26) * t2
+BACS_4 | c(t27, t27a) * t3
+BACS_4 | c(t28, t28a) * t4
+
+## unique factor variances
+BACS_38 ~~ c(1, NA) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4
+"
+```
+
+
+```{r results='hide'}
+configural_fit <- cfa(mod = configural_mod, 
+                      data = dat_sub, 
+                      estimator = "WLSMV", 
+                      ordered = TRUE, 
+                      group = "Gender", 
+                      parameterization = "theta")
+summary(configural_fit)
+```
+
+The configural model has an acceptable fit, `r get_fit(configural_fit)`. 
+
+
+### Test of Metric Invariance
+
+We then move on to assess metric invariance, which has the same identification constraints as the configural model, except that it has additional equality constraints on the loadings across groups.
+
+```{r}
+metric_mod <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_38 | c(t2, t2) * t2
+BACS_38 | c(t3, t3a) * t3
+BACS_38 | c(t4, t4a) * t4
+BACS_31 | c(t5, t5a) * t1
+BACS_31 | c(t6, t6) * t2
+BACS_31 | c(t7, t7a) * t3
+BACS_31 | c(t8, t8a) * t4
+BACS_29 | c(t9, t9a) * t1
+BACS_29 | c(t10, t10) * t2
+BACS_29 | c(t11, t11a) * t3
+BACS_29 | c(t12, t12a) * t4
+BACS_30 | c(t13, t13a) * t1
+BACS_30 | c(t14, t14) * t2
+BACS_30 | c(t15, t15a) * t3
+BACS_30 | c(t16, t16a) * t4
+BACS_1 | c(t17, t17a) * t1
+BACS_1 | c(t18, t18) * t2
+BACS_1 | c(t19, t19a) * t3
+BACS_1 | c(t20, t20a) * t4
+BACS_26 | c(t21, t21a) * t1
+BACS_26 | c(t22, t22) * t2
+BACS_26 | c(t23, t23a) * t3
+BACS_26 | c(t24, t24a) * t4
+BACS_4 | c(t25, t25a) * t1
+BACS_4 | c(t26, t26) * t2
+BACS_4 | c(t27, t27a) * t3
+BACS_4 | c(t28, t28a) * t4
+
+## unique factor variances
+BACS_38 ~~ c(1, NA) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4
+"
+```
+
+
+```{r results='hide'}
+metric_fit <- cfa(mod = metric_mod, 
+                  data = dat_sub, 
+                  estimator = "WLSMV", 
+                  ordered = TRUE, 
+                  group = "Gender", 
+                  parameterization = "theta")
+summary(metric_fit)
+```
+
+To evaluate metric invariance, we compare the model fit of the configural model to the metric model using the chi-square difference test with the method proposed by @satorra2010. 
+
+```{r}
+lavTestLRT(configural_fit, metric_fit, "satorra.bentler.2010")
+```
+
+The metric model has an acceptable fit, `r get_fit(metric_fit)`. The chi-square difference test is statistically nonsignificant, `r get_lrt(configural_fit, metric_fit)`, suggesting insufficient evidence that the loadings are noninvariant.
+
+
+### Test of Scalar Invariance 
+
+Next, we move on to the scalar model which further constrains thresholds to be equal between groups in addition to the constraints in the metric model. 
+
+```{r}
+scalar_mod <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_38 | c(t2, t2) * t2
+BACS_38 | c(t3, t3) * t3
+BACS_38 | c(t4, t4a) * t4
+BACS_31 | c(t5, t5) * t1
+BACS_31 | c(t6, t6) * t2
+BACS_31 | c(t7, t7) * t3
+BACS_31 | c(t8, t8) * t4
+BACS_29 | c(t9, t9) * t1
+BACS_29 | c(t10, t10) * t2
+BACS_29 | c(t11, t11) * t3
+BACS_29 | c(t12, t12) * t4
+BACS_30 | c(t13, t13) * t1
+BACS_30 | c(t14, t14) * t2
+BACS_30 | c(t15, t15) * t3
+BACS_30 | c(t16, t16) * t4
+BACS_1 | c(t17, t17) * t1
+BACS_1 | c(t18, t18) * t2
+BACS_1 | c(t19, t19) * t3
+BACS_1 | c(t20, t20) * t4
+BACS_26 | c(t21, t21) * t1
+BACS_26 | c(t22, t22) * t2
+BACS_26 | c(t23, t23) * t3
+BACS_26 | c(t24, t24) * t4
+BACS_4 | c(t25, t25) * t1
+BACS_4 | c(t26, t26) * t2
+BACS_4 | c(t27, t27) * t3
+BACS_4 | c(t28, t28) * t4
+
+## unique factor variances
+BACS_38 ~~ c(1, NA) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4
+"
+```
+
+
+```{r}
+scalar_fit <- cfa(mod = scalar_mod, 
+                  data = dat_sub, 
+                  estimator = "WLSMV", 
+                  ordered = TRUE, 
+                  group = "Gender", 
+                  parameterization = "theta")
+```
+
+
+```{r}
+lavTestLRT(metric_fit, scalar_fit, "satorra.bentler.2010")
+```
+
+
+The scalar model has fit `r get_fit(scalar_fit)`, and it is significantly different from the metric model, `r get_lrt(metric_fit, scalar_fit)`, indicating some thresholds are noninvariant. 
+
+### Search of Noninvariant Thresholds
+
+[WT]: # (Yichi, can you add the syntax for how you searched for the noninvariant thresholds here? Thanks!)
+
+Since the full threshold invariance fails, the unconstrained thresholds for all items need to be tested sequentially to identify the noninvariant threshold(s). `modindices()` in *lavaan* performs the search of noninvariant items with likelihood ratio test. A parameter is regarded as noninvariant if it has a modification index larger than 3.84, which is the quantile of the chi-square distribution with 1 degree of freedom at the .05 nominal level. 
+
+```{r}
+modindices(scalar_fit, free.remove = FALSE, op = "|", sort = TRUE)
+```
+
+The modification index suggests that the first threshold of `BACS_30` is noninvariant. 
+
+Another way to search for noninvariant parameters is with the chi-square difference test, which accounts for the ordered-categorical nature of the data [@svetina2019]. However, this method is not directly applied in *lavaan*. We wrote a helper function, `search_ninv()` to iteratively search for noninvariant parameters. To search for noninvariant thresholds, we specify "par = thresholds" and provide the scalar model syntax and fit of the scalar model. This may take a few minutes to run as it fits a series of models that free a threshold at a time. 
+
+```{r cache = TRUE}
+search_ninv(data = dat_sub, 
+            model = scalar_mod, 
+            fit = scalar_fit, 
+            group = "Gender", 
+            par = "thresholds")
+```
+
+The chi-square difference test suggests that the threshold with the label `t26`, the first threshold of `BACS_30`, is noninvariant. The result agrees with `modindices()`, but yields a different chi-square value, as also observed in @svetina2019. 
+
+
+### Test of Partial Scalar Invariance
+
+Next, we evaluate the fit of the partial scalar model that freely estimates the first threshold of `BACS_30`. 
+
+```{r}
+partial_scalar_mod <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_38 | c(t2, t2) * t2
+BACS_38 | c(t3, t3) * t3
+BACS_38 | c(t4, t4) * t4
+BACS_31 | c(t5, t5) * t1
+BACS_31 | c(t6, t6) * t2
+BACS_31 | c(t7, t7) * t3
+BACS_31 | c(t8, t8) * t4
+BACS_29 | c(t9, t9) * t1
+BACS_29 | c(t10, t10) * t2
+BACS_29 | c(t11, t11) * t3
+BACS_29 | c(t12, t12) * t4
+BACS_30 | c(t13, t13a) * t1
+BACS_30 | c(t14, t14) * t2
+BACS_30 | c(t15, t15) * t3
+BACS_30 | c(t16, t16) * t4
+BACS_1 | c(t17, t17) * t1
+BACS_1 | c(t18, t18) * t2
+BACS_1 | c(t19, t19) * t3
+BACS_1 | c(t20, t20) * t4
+BACS_26 | c(t21, t21) * t1
+BACS_26 | c(t22, t22) * t2
+BACS_26 | c(t23, t23) * t3
+BACS_26 | c(t24, t24) * t4
+BACS_4 | c(t25, t25) * t1
+BACS_4 | c(t26, t26) * t2
+BACS_4 | c(t27, t27) * t3
+BACS_4 | c(t28, t28) * t4
+
+## unique factor variances
+BACS_38 ~~ c(1, NA) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4
+"
+```
+
+
+```{r}
+partial_scalar_fit <- cfa(model = partial_scalar_mod,
+                          data = dat_sub, 
+                          estimator = "WLSMV", 
+                          ordered = TRUE,
+                          group = "Gender",
+                          parameterization = "theta")
+```
+
+
+The partial scalar model has a fit `r get_fit(partial_scalar_fit)` and does not fit worse than the metric model, `r get_lrt(partial_scalar_fit, metric_fit)`. As such, we proceed to the next stage of invariance testing with this partial scalar model. 
+
+### Test of Partial Strict Invariance
+
+Finally, we evaluate the partial strict invariance model, which constrains the unique factor variances to be equal in the items that have invariant thresholds in the partial scalar model.
+
+```{r}
+partial_strict_mod <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_38 | c(t2, t2) * t2
+BACS_38 | c(t3, t3) * t3
+BACS_38 | c(t4, t4) * t4
+BACS_31 | c(t5, t5) * t1
+BACS_31 | c(t6, t6) * t2
+BACS_31 | c(t7, t7) * t3
+BACS_31 | c(t8, t8) * t4
+BACS_29 | c(t9, t9) * t1
+BACS_29 | c(t10, t10) * t2
+BACS_29 | c(t11, t11) * t3
+BACS_29 | c(t12, t12) * t4
+BACS_30 | c(t13, t13a) * t1
+BACS_30 | c(t14, t14) * t2
+BACS_30 | c(t15, t15) * t3
+BACS_30 | c(t16, t16) * t4
+BACS_1 | c(t17, t17) * t1
+BACS_1 | c(t18, t18) * t2
+BACS_1 | c(t19, t19) * t3
+BACS_1 | c(t20, t20) * t4
+BACS_26 | c(t21, t21) * t1
+BACS_26 | c(t22, t22) * t2
+BACS_26 | c(t23, t23) * t3
+BACS_26 | c(t24, t24) * t4
+BACS_4 | c(t25, t25) * t1
+BACS_4 | c(t26, t26) * t2
+BACS_4 | c(t27, t27) * t3
+BACS_4 | c(t28, t28) * t4
+
+## unique factor variances
+BACS_38 ~~ c(1, 1) * BACS_38
+BACS_31 ~~ c(1, 1) * BACS_31
+BACS_29 ~~ c(1, 1) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, 1) * BACS_1
+BACS_26 ~~ c(1, 1) * BACS_26
+BACS_4 ~~ c(1, 1) * BACS_4
+"
+```
+
+
+```{r}
+partial_strict_fit <- cfa(model = partial_strict_mod,
+                          data = dat_sub, 
+                          estimator = "WLSMV", 
+                          ordered = TRUE,
+                          group = "Gender",
+                          parameterization = "theta")
+```
+
+The partial strict model has similar fit as the partial scalar model, `r get_lrt(partial_strict_fit, partial_scalar_fit)`. Thus, the final model is a partial strict invariant model with the first threshold and unique factor variance of the item `BACS_30` freed. 
+
+### Factor Mean Comparison
+
+We can obtain the parameter estimates in the partial scalar and partial strict models using `parameterestimates()`. Below we subset the details of the estimated factor mean difference (i.e., the estimated factor mean of the focal group as the factor mean of the reference group is set to 0). 
+
+```{r }
+subset(parameterestimates(partial_scalar_fit),
+       group == 2 & lhs == "f" & op == "~1")
+subset(parameterestimates(partial_strict_fit),
+       group == 2 & lhs == "f" & op == "~1")
+```
+
+
+The factor mean difference is statistically significant in both the partial scalar model, $-.63, 95\% \text{ CI }[-0.99, -0.29]$, and the partial strict model, $-.64, 95\% \text{ CI }[-0.99, -0.28]$. Note that for ordered-polytomous items, factor mean comparisons are valid in both the scalar/partial scalar and strict/partial strict models. 
+
+
+## MI Testing With Dichotomous Items
+
+In the following, we illustrate the MI testing procedure for dichotomous items using *lavaan*. We note that, with binary outcomes, past research recommended skipping metric model and going directly from conﬁgural to scalar model [see @muthen2002; @putnick2016; @wu2016 for more details], and hence only three models should be tested, including the strict model.
+
+To create a dichotomous version of the Helpful subscale, we dichotomize the ordered-polytomous items by relabeling the original responses less than 3 as 0, and the responses equal to or higher than 3 as 1. 
+
+```{r, echo = TRUE}
+dat_dich <- dat_sub %>%
+   mutate_at(vars(BACS_38:BACS_4), ~ if_else(. < 3, 0, 1))
+items <- c("BACS_38", "BACS_31", "BACS_29", "BACS_30","BACS_1","BACS_26", "BACS_4")
+```
+
+### Test of Configural Invariance
+
+We begin with choosing item `BACS_38` as the marker variable and constrain its loading to be equal between groups. Note we fix the latent factor variance of the first group to be 1 and allow the loading of the marker variable to freely vary. Moreover, all thresholds are constrained to be equal for identification purposes. As such, for dichotomous items, the configural model evaluates the equality of the number and patterns of parameters, as well as threshold invariance. An inadequate fit of the configural model would indicate a violation of configural invariance and threshold invariance. We refer readers to @millsap2004 for details on identification conditions for dichotomous items. 
+
+```{r}
+configural_mod_d <- 
+"## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(NA, NA) * BACS_31 + 
+     c(NA, NA) * BACS_29 + c(NA, NA) * BACS_30 + c(NA, NA) * BACS_1 + 
+     c(NA, NA) * BACS_26 + c(NA, NA) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_31 | c(t2, t2) * t1
+BACS_29 | c(t3, t3) * t1
+BACS_30 | c(t4, t4) * t1
+BACS_1 | c(t5, t5) * t1
+BACS_26 | c(t6, t6) * t1
+BACS_4 | c(t7, t7) * t1
+
+## unique factor variances
+BACS_38 ~~ c(1, 1) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4"
+```
+
+```{r, results='hide'}
+configural_fit_d <- cfa(model = configural_mod_d, 
+                        data = dat_dich, 
+                        estimator = "WLSMV", 
+                        ordered = items, 
+                        group = "Gender", 
+                        parameterization = "theta")
+summary(configural_fit_d, fit.measures = TRUE)
+```
+
+The configural model has an acceptable fit, `r get_fit(configural_fit_d)`, supporting configural and threshold invariance. 
+
+### Test of Scalar Invariance
+
+Next, the scalar invariance model is fit to data by setting equality constraints on all loadings across groups, in addition to the identification constraints set in the configural model.
+
+```{r}
+scalar_mod_d <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_31 | c(t2, t2) * t1
+BACS_29 | c(t3, t3) * t1
+BACS_30 | c(t4, t4) * t1
+BACS_1 | c(t5, t5) * t1
+BACS_26 | c(t6, t6) * t1
+BACS_4 | c(t7, t7) * t1
+
+## unique factor variances
+BACS_38 ~~ c(1, 1) * BACS_38
+BACS_31 ~~ c(1, NA) * BACS_31
+BACS_29 ~~ c(1, NA) * BACS_29
+BACS_30 ~~ c(1, NA) * BACS_30
+BACS_1 ~~ c(1, NA) * BACS_1
+BACS_26 ~~ c(1, NA) * BACS_26
+BACS_4 ~~ c(1, NA) * BACS_4
+"
+```
+
+```{r, results='hide'}
+scalar_fit_d <- cfa(model = scalar_mod_d, 
+                    data = dat_dich, 
+                    estimator = "WLSMV", 
+                    ordered = TRUE, 
+                    group = "Gender", 
+                    parameterization = "theta")
+summary(scalar_fit_d, fit.measures = TRUE)
+```
+
+To evaluate scalar invarince, we compare the model fit of the configural model to the scalar model using the chi-square difference test with the method proposed by Satorra and Bentler (2010). 
+
+```{r}
+lavTestLRT(configural_fit_d, scalar_fit_d, 
+           method = "satorra.bentler.2010")
+```
+
+The scalar invariance model does not fit worse than the configural model, `r get_lrt(configural_fit_d, scalar_fit_d)`. It has acceptable fit `r get_fit(scalar_fit_d)`.
+ 
+
+### Test of Strict Invariance
+ 
+Lastly, we fit a strict invariance model which further constrains the unique factor variance for all items across groups. 
+
+```{r}
+strict_mod_d <- "
+## loadings
+f =~ c(NA, NA) * BACS_38 + c(l1, l1) * BACS_38 + c(l2, l2) * BACS_31 + 
+     c(l3, l3) * BACS_29 + c(l4, l4) * BACS_30 + c(l5, l5) * BACS_1 + 
+     c(l6, l6) * BACS_26 + c(l7, l7) * BACS_4
+
+## common factor
+f ~ c(0, NA) * 1
+f ~~ c(1, NA) * f
+
+## thresholds
+BACS_38 | c(t1, t1) * t1
+BACS_31 | c(t2, t2) * t1
+BACS_29 | c(t3, t3) * t1
+BACS_30 | c(t4, t4) * t1
+BACS_1 | c(t5, t5) * t1
+BACS_26 | c(t6, t6) * t1
+BACS_4 | c(t7, t7) * t1
+
+## unique factor variances
+BACS_38 ~~ c(1, 1) * BACS_38
+BACS_31 ~~ c(1, 1) * BACS_31
+BACS_29 ~~ c(1, 1) * BACS_29
+BACS_30 ~~ c(1, 1) * BACS_30
+BACS_1 ~~ c(1, 1) * BACS_1
+BACS_26 ~~ c(1, 1) * BACS_26
+BACS_4 ~~ c(1, 1) * BACS_4
+"
+```
+
+```{r, results='hide'}
+strict_fit_d <- cfa(model = strict_mod_d, 
+                    data = dat_dich, 
+                    estimator = "WLSMV", 
+                    ordered = TRUE, 
+                    group = "Gender", 
+                    parameterization = "theta")
+summary(strict_fit_d, fit.measures = TRUE)
+```
+
+Similarly, we compare the strict model with the scalar model using chi-square difference test to evaluate whether strict invariance holds. 
+
+```{r}
+lavTestLRT(scalar_fit_d, strict_fit_d, 
+           method = "satorra.bentler.2010")
+```
+
+
+The strict invariance model has a similar fit as the scalar invariance model, `r get_lrt(scalar_fit_d, strict_fit_d)`. The fit of the strict model is good, `r get_fit(strict_fit_d)`. Therefore, we conclude that the dichotomous version of the Helpful subscale of BACS is strict invariant. 
+
+### Observed Mean Comparison
+
+As strict invariance holds, we can perform valid group comparisons with the observed scores. 
+
+```{r}
+# create sum scores of the seven items
+reference_sum <- rowSums(subset(dat_dich, Gender == 2, 
+                                select = - Gender))
+focal_sum <- rowSums(subset(dat_dich, Gender == 1, 
+                            select = - Gender))
+```
+
+
+```{r}
+(t <- t.test(reference_sum, focal_sum))
+```
+The Welch independent sample t-test suggests that the Helpful beliefs about crying significantly differ between gender, `r round(diff(t$estimate), 2)`, 95% CI [`r paste0(round(t$conf.int, 2), collapse = ", ")`]. 
+
+
+### Factor Mean Comparison
+
+We can obtain the estimate of factor mean difference using the following syntax. 
+
+```{r}
+subset(parameterestimates(scalar_fit_d),
+       group == 2 & lhs == "f" & op == "~1")
+subset(parameterestimates(strict_fit_d),
+       group == 2 & lhs == "f" & op == "~1")
+```
+
+As shown above, the factor mean difference was similar in the scalar model, `r get_mdiff("scalar", scalar_fit_d, strict_fit_d)`, and in the strict model, `r get_mdiff("strict", scalar_fit_d, strict_fit_d)`. However, the standard error is larger in the scalar model, $\text{SE} = .20$, than in the strict model, $\text{SE} = .16$, resulting in a wider confidence interval in the scalar model. Although the statistical conclusion is the same between the two models in this example, as shown in the simulation results, statistical inference can be inaccurate in the scalar model but not in the strict model. In general, we recommend researchers to use the strict/partial strict model for factor mean comparison with dichotomous items, regardless of whether strict invariance holds. 
+
+# Reference
+

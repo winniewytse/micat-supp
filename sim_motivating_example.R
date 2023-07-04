@@ -163,11 +163,11 @@ analyze <- function(condition, dat, fixed_objects = NULL){
 
 # Simulation ---------------------------------------------
 
-set.seed(1063)
+set.seed(14)
 dat_rc2 <- datgen(design_factor[1, ])
 res_rc2 <- analyze(design_factor[1, ], dat_rc2, fixed_objects = list(mod = mod))
 
-set.seed(1063)
+set.seed(20)
 dat_rc5 <- datgen(design_factor[2, ])
 res_rc5 <- analyze(design_factor[2, ], dat_rc5, fixed_objects = list(mod = mod))
 round(res_rc5, 3)
